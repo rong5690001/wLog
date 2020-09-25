@@ -12,11 +12,11 @@
 6. 乐观锁和悲观锁？
 7. 乐观锁如何实现原子性？
 
-![166786b5cf6d7f95](/Users/laura/Desktop/166786b5cf6d7f95.png)
+![166786b5cf6d7f95](https://p1-juejin.byteimg.com/tos-cn-i-k3u1fbpfcp/f2f091f458b1478cb443b82af4d98b4f~tplv-k3u1fbpfcp-zoom-1.image)
 
 ​																			JDK8之前的数据区
 
-![image-20200919153609023](/Users/laura/Desktop/20180812235058303.jpg)
+![image-20200919153609023](https://p1-juejin.byteimg.com/tos-cn-i-k3u1fbpfcp/adc98085a42a4ea09551026b1267f7e5~tplv-k3u1fbpfcp-zoom-1.image)
 
 ​																JDK8之后的数据区
 

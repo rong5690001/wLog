@@ -68,5 +68,7 @@
 
 注：I/O详解可以参考https://juejin.im/post/6844903910348603405
 
-​		NIO参考 ：https://www.jianshu.com/p/362b365e1bcc
+​		NIO参考 ：https://www.jianshu.com/p/362b365e1bcc，https://cloud.tencent.com/developer/article/1488087
+
+​		虚拟内存参考：https://blog.csdn.net/weixin_40864891/article/details/105272616
 

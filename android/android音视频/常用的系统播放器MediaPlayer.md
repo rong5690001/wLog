@@ -27,7 +27,8 @@ MediaPlayer类用于视频/音频文件的播放控制。本节主要覆盖Media
 ### 1.1、MediaPlayer的状态图
 
 MediaPlayer用于控制视频/音频文件及流的播放，由状态机进行管理。图2-1显示了MediaPlayer状态周期。
-![image-20201125194141663](https://tva1.sinaimg.cn/large/0081Kckwgy1gl1nlo4gmwj30rc0x613x.jpg)
+
+![screenshot_20201129_204622](https://tva1.sinaimg.cn/large/0081Kckwgy1gl6bygoctij31400mi0yk.jpg)
 
 <center>图2-1 MediaPlayer状态周期</center>
 
@@ -77,7 +78,7 @@ MediaPlayer在播放控制时可以是Paused（暂停）和Stopped（停止）�
 
 MediaPlayer时序图一，如图2-2所示。
 
-![image-20201125195234158](https://tva1.sinaimg.cn/large/0081Kckwgy1gl1nx17t33j30r60i67da.jpg)
+![screenshot_20201129_204358](https://tva1.sinaimg.cn/large/0081Kckwgy1gl6bwsvtzsj31400miqdf.jpg)
 
 <center>图2-2 从create到setDisplay过程的时序图</center>
 
@@ -87,7 +88,7 @@ MediaPlayer时序图一，如图2-2所示。
 
 当外部调用MediaPlayer.create(this, ＂http://www.xxx.mp4＂)时，进入MediaPlayer的创建过程：
 
-![image-20201126095959865](../../../Library/Application%20Support/typora-user-images/image-20201126095959865.png)
+![image-20201129202125306](https://tva1.sinaimg.cn/large/0081Kckwgy1gl6b8bzze9j30f40aoq5d.jpg)
 
 ```java
 public static MediaPlayer create(Context context, Uri uri, SurfaceHolder holder,
@@ -1060,3 +1061,408 @@ sp<IMediaPlayer> MediaPlayerService::create(const sp<IMediaPlayerClient>& client
 
 与之相关的是IPCThreadState，每个线程都有一个IPCThreadState实例登记在Linux线程的上下文附属数据中，主要负责Binder的读取、写入和请求处理。IPCThreadState在构造的时候获取进程的ProcessState并记录在自己的成员变量mProcess中，通过mProcess可以获得Binder的句柄。IPCThreadState通过IPCThreadState::transact把data及handle等填充进binder_transaction_data，在两个进程间通信。
 
+这里这个Client到底是什么？我们又得追踪一下，在frameworks/av/media/libmediaplayerservice/MediaPlayerService.h中，如下：
+
+```c++
+class Client : public BnMediaPlayer {
+        // IMediaPlayer interface
+        virtual void            disconnect();
+        virtual status_t        setVideoSurfaceTexture(
+                                        const sp<IGraphicBufferProducer>& bufferProducer);
+        virtual status_t        setBufferingSettings(const BufferingSettings& buffering) override;
+        virtual status_t        getBufferingSettings(
+                                        BufferingSettings* buffering /* nonnull */) override;
+        virtual status_t        prepareAsync();
+        virtual status_t        start();
+        virtual status_t        stop();
+        virtual status_t        pause();
+        virtual status_t        isPlaying(bool* state);
+        virtual status_t        setPlaybackSettings(const AudioPlaybackRate& rate);
+        virtual status_t        getPlaybackSettings(AudioPlaybackRate* rate /* nonnull */);
+        virtual status_t        setSyncSettings(const AVSyncSettings& rate, float videoFpsHint);
+        virtual status_t        getSyncSettings(AVSyncSettings* rate /* nonnull */,
+                                                float* videoFps /* nonnull */);
+        virtual status_t        seekTo(
+                int msec,
+                MediaPlayerSeekMode mode = MediaPlayerSeekMode::SEEK_PREVIOUS_SYNC);
+        virtual status_t        getCurrentPosition(int* msec);
+        virtual status_t        getDuration(int* msec);
+        virtual status_t        reset();
+        virtual status_t        notifyAt(int64_t mediaTimeUs);
+        virtual status_t        setAudioStreamType(audio_stream_type_t type);
+        virtual status_t        setLooping(int loop);
+        virtual status_t        setVolume(float leftVolume, float rightVolume);
+    }; // Client
+```
+
+总结一下上面的代码，Client类的继承关系为Client->BnMediaPlayer->IMediaPlayer。分析上面的代码可以看出，create函数构造了一个Client对象，并将此Client对象添加到MediaPlayerService类的全局列表mClients中，这是一个SortedVector，紧接着执行player->setDataSource(url,headers)，即Clients::setDataSource，因此在setDataSource中有如下语句：
+
+```c++
+sp<IMediaPlayer> player(service->create(this, mAudioSessionId));
+```
+
+等价于
+
+```c++
+sp<IMediaPlayer> player(newClient(**));
+```
+
+即player最终是用Client对象来初始化的，可以直接认为player==Client。
+这时候问题来了，在C++中，这个Client及MediaPlayer又是什么关系呢？
+
+-  Client是MediaPlayerService内部的一个类，我们从上面的代码已知，因为MediaPlayerService运行在服务器端，故Client也运行在服务器端。
+-  Client在MediaPlayerService.h中，那接着看看MediaPlayerService中的实现，实现过程中调用过MediaPlayerService类的一些函数，同样回到setDataSource。代码如下：
+
+```c++
+status_t MediaPlayerService::Client::setDataSource(
+        const sp<IMediaHTTPService> &httpService,
+        const char *url,
+        const KeyedVector<String8, String8> *headers)
+{
+    ALOGV("setDataSource(%s)", url);
+    if (url == NULL)
+        return UNKNOWN_ERROR;
+		//这里匹配来自HTTP、HTTPS、RTSP的相关url,这些流是需要经过网络传输的，检查其是否设置了相应的权限，如果没有，返回PERMISSON_DENIED
+    if ((strncmp(url, "http://", 7) == 0) ||
+        (strncmp(url, "https://", 8) == 0) ||
+        (strncmp(url, "rtsp://", 7) == 0)) {
+        if (!checkPermission("android.permission.INTERNET")) {
+            return PERMISSION_DENIED;
+        }
+    }
+		//判断是否通过contentprovider提供的数据
+    if (strncmp(url, "content://", 10) == 0) {
+        // get a filedescriptor for the content Uri and
+        // pass it to the setDataSource(fd) method
+
+        String16 url16(url);
+        int fd = android::openContentProviderFile(url16);
+        if (fd < 0)
+        {
+            ALOGE("Couldn't open fd for %s", url);
+            return UNKNOWN_ERROR;
+        }
+        status_t status = setDataSource(fd, 0, 0x7fffffffffLL); // this sets mStatus
+        close(fd);
+        return mStatus = status;
+    } else {
+        player_type playerType = MediaPlayerFactory::getPlayerType(this, url);
+        sp<MediaPlayerBase> p = setDataSource_pre(playerType);
+        if (p == NULL) {
+            return NO_INIT;
+        }
+
+        return mStatus =
+                setDataSource_post(
+                p, p->setDataSource(httpService, url, headers));
+    }
+}
+```
+
+接下来重新看看MediaPlayer中头文件定义的函数声明，方便对比Client中的函数，以下代码在frameworks/av/include/media/mediaplayer.h中：
+
+```c++
+class MediaPlayer : public BnMediaPlayerClient,
+                    public virtual IMediaDeathNotifier
+{
+public:
+    MediaPlayer();
+    ~MediaPlayer();
+            void            died();
+            void            disconnect();
+
+            status_t        setDataSource(
+                    const sp<IMediaHTTPService> &httpService,
+                    const char *url,
+                    const KeyedVector<String8, String8> *headers);
+
+            status_t        setDataSource(int fd, int64_t offset, int64_t length);
+            status_t        setDataSource(const sp<IDataSource> &source);
+            status_t        setVideoSurfaceTexture(
+                                    const sp<IGraphicBufferProducer>& bufferProducer);
+            status_t        setListener(const sp<MediaPlayerListener>& listener);
+            status_t        getBufferingSettings(BufferingSettings* buffering /* nonnull */);
+            status_t        setBufferingSettings(const BufferingSettings& buffering);
+            status_t        prepare();
+            status_t        prepareAsync();
+            status_t        start();
+            status_t        stop();
+            status_t        pause();
+            bool            isPlaying();
+            //省略部分代码
+};
+```
+
+这里的函数和Client中的函数是一一对应的，两者通过Client的代理类联系在了一起：
+
+```c++
+status_t MediaPlayer::setDataSource(
+        const sp<IMediaHTTPService> &httpService,
+        const char *url, const KeyedVector<String8, String8> *headers)
+{
+    ALOGV("setDataSource(%s)", url);
+    status_t err = BAD_VALUE;
+    if (url != NULL) {
+        const sp<IMediaPlayerService> service(getMediaPlayerService());
+        if (service != 0) {
+            sp<IMediaPlayer> player(service->create(this, mAudioSessionId));
+            if ((NO_ERROR != doSetRetransmitEndpoint(player)) ||
+                (NO_ERROR != player->setDataSource(httpService, url, headers))) {
+                player.clear();
+            }
+            err = attachNewPlayer(player);
+        }
+    }
+    return err;
+}
+
+status_t MediaPlayer::attachNewPlayer(const sp<IMediaPlayer>& player)
+{
+    status_t err = UNKNOWN_ERROR;
+    sp<IMediaPlayer> p;
+    { // scope for the lock
+        Mutex::Autolock _l(mLock);
+
+        if ( !( (mCurrentState & MEDIA_PLAYER_IDLE) ||
+                (mCurrentState == MEDIA_PLAYER_STATE_ERROR ) ) ) {
+            ALOGE("attachNewPlayer called in state %d", mCurrentState);
+            return INVALID_OPERATION;
+        }
+
+        clear_l();
+        p = mPlayer;
+        mPlayer = player;
+        if (player != 0) {
+            mCurrentState = MEDIA_PLAYER_INITIALIZED;
+            err = NO_ERROR;
+        } else {
+            ALOGE("Unable to create media player");
+        }
+    }
+
+    if (p != 0) {
+        p->disconnect();
+    }
+
+    return err;
+}
+```
+
+上面的两个函数，一个是MediaPlayer的setDataSource，会调到attachNewPlayer函数，这个函数最终会调用服务器端Client对应的函数。到这里可能有读者会想，IMediaPlayer.h和mediaplayer.h的区别是什么？那么下面介绍一下IMediaPlayer.h、mediaplayer.h、ImediaPlayer-Client.h的区别。
+
+- 从包结构上看：IMediaPlayer和IMediaPlayerClient.h都在frameworks/av/media/libmedia包中，而mediaplayer.h在/av/include/media包中（前面已有代码贴出）。
+-  从功能上看：它们肩负的职责也不一样。
+  这里贴出IMediaPlayer.h及IMediaPlayerClient.h的代码，IMediaPlayer.h位于frameworks/av/media/libmedia包中：
+
+```c++
+#ifndef ANDROID_IMEDIAPLAYER_H
+#define ANDROID_IMEDIAPLAYER_H
+
+#include <utils/RefBase.h>
+#include <binder/IInterface.h>
+#include <binder/Parcel.h>
+#include <utils/KeyedVector.h>
+#include <system/audio.h>
+
+#include <media/MediaSource.h>
+#include <media/VolumeShaper.h>
+
+// Fwd decl to make sure everyone agrees that the scope of struct sockaddr_in is
+// global, and not in android::
+struct sockaddr_in;
+
+namespace android {
+
+class Parcel;
+class Surface;
+class IDataSource;
+struct IStreamSource;
+class IGraphicBufferProducer;
+struct IMediaHTTPService;
+struct AudioPlaybackRate;
+struct AVSyncSettings;
+struct BufferingSettings;
+
+typedef MediaSource::ReadOptions::SeekMode MediaPlayerSeekMode;
+
+class IMediaPlayer: public IInterface
+{
+public:
+    DECLARE_META_INTERFACE(MediaPlayer);
+
+    virtual void            disconnect() = 0;
+
+    virtual status_t        setDataSource(
+            const sp<IMediaHTTPService> &httpService,
+            const char *url,
+            const KeyedVector<String8, String8>* headers) = 0;
+
+    virtual status_t        setDataSource(int fd, int64_t offset, int64_t length) = 0;
+    virtual status_t        setDataSource(const sp<IStreamSource>& source) = 0;
+    virtual status_t        setDataSource(const sp<IDataSource>& source) = 0;
+    virtual status_t        setVideoSurfaceTexture(
+                                    const sp<IGraphicBufferProducer>& bufferProducer) = 0;
+    virtual status_t        getBufferingSettings(
+                                    BufferingSettings* buffering /* nonnull */) = 0;
+    virtual status_t        setBufferingSettings(const BufferingSettings& buffering) = 0;
+    virtual status_t        prepareAsync() = 0;
+    virtual status_t        start() = 0;
+    virtual status_t        stop() = 0;
+    virtual status_t        pause() = 0;
+    virtual status_t        isPlaying(bool* state) = 0;
+    virtual status_t        setPlaybackSettings(const AudioPlaybackRate& rate) = 0;
+    virtual status_t        getPlaybackSettings(AudioPlaybackRate* rate /* nonnull */) = 0;
+    virtual status_t        setSyncSettings(const AVSyncSettings& sync, float videoFpsHint) = 0;
+    virtual status_t        getSyncSettings(AVSyncSettings* sync /* nonnull */,
+                                            float* videoFps /* nonnull */) = 0;
+    virtual status_t        seekTo(
+            int msec,
+            MediaPlayerSeekMode mode = MediaPlayerSeekMode::SEEK_PREVIOUS_SYNC) = 0;
+    virtual status_t        getCurrentPosition(int* msec) = 0;
+    virtual status_t        getDuration(int* msec) = 0;
+    virtual status_t        notifyAt(int64_t mediaTimeUs) = 0;
+    virtual status_t        reset() = 0;
+    virtual status_t        setAudioStreamType(audio_stream_type_t type) = 0;
+    virtual status_t        setLooping(int loop) = 0;
+    virtual status_t        setVolume(float leftVolume, float rightVolume) = 0;
+    virtual status_t        setAuxEffectSendLevel(float level) = 0;
+    virtual status_t        attachAuxEffect(int effectId) = 0;
+    virtual status_t        setParameter(int key, const Parcel& request) = 0;
+    virtual status_t        getParameter(int key, Parcel* reply) = 0;
+    virtual status_t        setRetransmitEndpoint(const struct sockaddr_in* endpoint) = 0;
+    virtual status_t        getRetransmitEndpoint(struct sockaddr_in* endpoint) = 0;
+    virtual status_t        setNextPlayer(const sp<IMediaPlayer>& next) = 0;
+
+    virtual media::VolumeShaper::Status applyVolumeShaper(
+                                    const sp<media::VolumeShaper::Configuration>& configuration,
+                                    const sp<media::VolumeShaper::Operation>& operation) = 0;
+    virtual sp<media::VolumeShaper::State> getVolumeShaperState(int id) = 0;
+
+    // Modular DRM
+    virtual status_t        prepareDrm(const uint8_t uuid[16],
+                                    const Vector<uint8_t>& drmSessionId) = 0;
+    virtual status_t        releaseDrm() = 0;
+
+    // Invoke a generic method on the player by using opaque parcels
+    // for the request and reply.
+    // @param request Parcel that must start with the media player
+    // interface token.
+    // @param[out] reply Parcel to hold the reply data. Cannot be null.
+    // @return OK if the invocation was made successfully.
+    virtual status_t        invoke(const Parcel& request, Parcel *reply) = 0;
+
+    // Set a new metadata filter.
+    // @param filter A set of allow and drop rules serialized in a Parcel.
+    // @return OK if the invocation was made successfully.
+    virtual status_t        setMetadataFilter(const Parcel& filter) = 0;
+
+    // Retrieve a set of metadata.
+    // @param update_only Include only the metadata that have changed
+    //                    since the last invocation of getMetadata.
+    //                    The set is built using the unfiltered
+    //                    notifications the native player sent to the
+    //                    MediaPlayerService during that period of
+    //                    time. If false, all the metadatas are considered.
+    // @param apply_filter If true, once the metadata set has been built based
+    //                     on the value update_only, the current filter is
+    //                     applied.
+    // @param[out] metadata On exit contains a set (possibly empty) of metadata.
+    //                      Valid only if the call returned OK.
+    // @return OK if the invocation was made successfully.
+    virtual status_t        getMetadata(bool update_only,
+                                        bool apply_filter,
+                                        Parcel *metadata) = 0;
+
+    // AudioRouting
+    virtual status_t        setOutputDevice(audio_port_handle_t deviceId) = 0;
+    virtual status_t        getRoutedDeviceId(audio_port_handle_t *deviceId) = 0;
+    virtual status_t        enableAudioDeviceCallback(bool enabled) = 0;
+};
+
+// ----------------------------------------------------------------------------
+
+class BnMediaPlayer: public BnInterface<IMediaPlayer>
+{
+public:
+    virtual status_t    onTransact( uint32_t code,
+                                    const Parcel& data,
+                                    Parcel* reply,
+                                    uint32_t flags = 0);
+};
+
+}; // namespace android
+
+#endif // ANDROID_IMEDIAPLAYER_H
+```
+
+在IMediaPlayer.h中定义的基本上都是虚函数，而我们知道虚函数在C++中用于实现多态性（Polymorphism），多态性是将接口与具体实现代码进行了分离，用形象的语言来解释就是以共同的方法实现，但因个体差异而采用不同的策略。所以它的功能是实现MediaPlayer功能的接口，看到onTransact函数，自然联想Binder通信，把底层的Parcel指针类型数据向上层的另一个进程传递。
+
+再分析一下IMediaPlayerClient.h，同样位于frameworks/av/media/libmedia包中：
+
+```c++
+#include <utils/RefBase.h>
+#include <binder/IInterface.h>
+#include <binder/Parcel.h>
+
+#include <media/IMediaPlayerClient.h>
+
+namespace android {
+
+enum {
+    NOTIFY = IBinder::FIRST_CALL_TRANSACTION,
+};
+
+class BpMediaPlayerClient: public BpInterface<IMediaPlayerClient>
+{
+public:
+    explicit BpMediaPlayerClient(const sp<IBinder>& impl)
+        : BpInterface<IMediaPlayerClient>(impl)
+    {
+    }
+
+    virtual void notify(int msg, int ext1, int ext2, const Parcel *obj)
+    {
+        Parcel data, reply;
+        data.writeInterfaceToken(IMediaPlayerClient::getInterfaceDescriptor());
+        data.writeInt32(msg);
+        data.writeInt32(ext1);
+        data.writeInt32(ext2);
+        if (obj && obj->dataSize() > 0) {
+            data.appendFrom(const_cast<Parcel *>(obj), 0, obj->dataSize());
+        }
+        remote()->transact(NOTIFY, data, &reply, IBinder::FLAG_ONEWAY);
+    }
+};
+
+IMPLEMENT_META_INTERFACE(MediaPlayerClient, "android.media.IMediaPlayerClient");
+
+// ----------------------------------------------------------------------
+
+status_t BnMediaPlayerClient::onTransact(
+    uint32_t code, const Parcel& data, Parcel* reply, uint32_t flags)
+{
+    switch (code) {
+        case NOTIFY: {
+            CHECK_INTERFACE(IMediaPlayerClient, data, reply);
+            int msg = data.readInt32();
+            int ext1 = data.readInt32();
+            int ext2 = data.readInt32();
+            Parcel obj;
+            if (data.dataAvail() > 0) {
+                obj.appendFrom(const_cast<Parcel *>(&data), data.dataPosition(), data.dataAvail());
+            }
+
+            notify(msg, ext1, ext2, &obj);
+            return NO_ERROR;
+        } break;
+        default:
+            return BBinder::onTransact(code, data, reply, flags);
+    }
+}
+
+} // namespace android
+```
+
+总结一下上面的代码，在内部定义一个BpMediaPlayerClient类（也就是Client的父类），然后它有一个onTransact函数。一般onXXX都是被动回调过来的，不是由自己控制的，如Activity中的onCreate、onPause、onStart函数，这些函数都是在其他地方处理并通知到Activity中的。这里也是一样的，onTransact作为Binder通信中的回调函数，前面介绍到player实际上是C/S模式的，IMediaPlayerClient.h的功能是描述一个MediaPlayer客户端的接口。
+
+综上所述，mediaplayer.h的功能是对外（JNI层）的接口类，它最主要的是定义了一个MediaPlayer类（C++层），我们在android_media_MediaPlayer.cpp中就引入了media/mediaplayer.h；IMediaPlayer.h则是一个实现MediaPlayer（C++层）功能的接口；而IMediaPlayerClient.h的功能是描述一个MediaPlayer客户端（这里暂且理解为前面说的Client）的接口。

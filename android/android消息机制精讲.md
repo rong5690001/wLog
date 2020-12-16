@@ -6,11 +6,13 @@
 4. 主线程的Looper死循环为什么不会卡顿？（EPoll）
 5. 什么是同步消息、异步消息、同步屏障？
 
+![image-20201204170253323](https://tva1.sinaimg.cn/large/0081Kckwgy1glbxl6x2pyj30mp0is7cv.jpg)
+
 ## Handler、Looper、Message之间的关系？
 
 ​		下图这张图大致的说明了下它们三者之间的关系：
 
-![image-20200924141208001](/Users/user/wLog/android/image-20200924141208001.png)
+![image-20201204170429406](https://tva1.sinaimg.cn/large/0081Kckwgy1glbxmt0g5ej30ov0niwke.jpg)
 
 ​		Handler有两个成员变量Looper和MessageQueue，其中MessageQueue也是Looper的成员变量。Handler中的MessageQueue其实是Looper中的MessageQueue，看下面的代码：
 
@@ -254,3 +256,4 @@ Message next() {
 ## 什么是同步消息、异步消息、同步屏障？
 
 参考：https://www.jianshu.com/p/28fba43ac0b0
+
